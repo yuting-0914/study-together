@@ -263,6 +263,9 @@
     color: #4A3728; font-size: 13px; min-height: 56px; word-break: break-word;
     box-shadow: 0 2px 6px rgba(0,0,0,.12);
   }
+  .note-item .note-by { display: block; margin-top: 6px; font-size: 11px; color: #8C7660; }
+  .note-item.mine { box-shadow: 0 0 0 2px #E0775A, 0 2px 6px rgba(0,0,0,.12); }
+  .note-empty { grid-column: 1 / -1; text-align: center; color: var(--muted); font-size: 13px; padding: 6px 0; }
   .note-item button { position: absolute; top: 4px; right: 4px; border: 0; background: transparent; color: #8C7660; width: 22px; height: 22px; border-radius: 6px; }
   .note-item button:hover { background: rgba(0,0,0,.08); color: #E0775A; }
   .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
@@ -667,7 +670,7 @@
 <div class="modal-backdrop" id="noteModal" hidden>
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="noteTitle">
     <h3 id="noteTitle">軟木板便條</h3>
-    <p class="modal-sub">寫下想對自己說的話，會貼在自修室的軟木板上（最多 6 張）</p>
+    <p class="modal-sub" id="noteSub">寫下想對自己說的話，會貼在自修室的軟木板上（最多 6 張）</p>
     <textarea id="noteText" class="text-input" rows="3" maxlength="40" placeholder="例如：今天也要加油！"></textarea>
     <div class="note-row"><div class="note-colors" id="noteColors" role="radiogroup" aria-label="便條顏色"></div><span id="noteCount">0/40</span></div>
     <div class="modal-actions">
@@ -683,6 +686,21 @@
      即使 3D 場景載入失敗，這些功能仍可正常使用
      ============================================================ -->
 <script>
+/* ============================================================
+   共享軟木板設定（Firebase Firestore）
+   把 Firebase 專案的網頁應用程式設定貼進來即可開啟共享；
+   留空時軟木板自動使用單機模式（便條只存在自己的瀏覽器）。
+   ============================================================ */
+const FIREBASE_CONFIG = {
+  apiKey: 'AIzaSyCNlstO7wzdYadMxVL0fszUcy---pdZOmo',
+  authDomain: 'study-together-73249.firebaseapp.com',
+  projectId: 'study-together-73249',
+  storageBucket: 'study-together-73249.firebasestorage.app',
+  messagingSenderId: '728765829631',
+  appId: '1:728765829631:web:90d0492f35754db1e297ca'
+};
+const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/13.0.0/';
+
 (() => {
   const $ = (id) => document.getElementById(id);
 
@@ -702,6 +720,8 @@
     stats: 'studyroom.stats',
     todos: 'studyroom.todos',
     notes: 'studyroom.notes',
+    myNotes: 'studyroom.myNotes',
+    notePost: 'studyroom.notePost',
     tour: 'studyroom.tour'
   };
   const Storage = {
@@ -1184,53 +1204,205 @@
     }
   };
 
-  /* ---------- 軟木板便條 ---------- */
+  /* ---------- 軟木板便條（共享模式：Firebase；單機模式：localStorage） ---------- */
   const NOTE_COLORS = ['#FFE9A8', '#F8C9C0', '#CFE3C2', '#C9DDF0'];
+  const BAD_WORDS = ['幹你', '幹您', '靠北', '靠杯', '白癡', '白痴', '智障', '去死', '雞掰', '機掰', '操你', '屌', '婊', '垃圾人', 'fuck', 'shit', 'bitch', 'damn'];
+  const POST_COOLDOWN = 20 * 1000;
+  // 共享軟木板每 12 小時清空一次：台灣時間 0:00 與 12:00
+  const TW_OFFSET = 8 * 3600e3, HALF_DAY = 12 * 3600e3;
+  function boardWindow(now = Date.now()) {
+    const idx = Math.floor((now + TW_OFFSET) / HALF_DAY);
+    const start = idx * HALF_DAY - TW_OFFSET;
+    return { key: 'w' + idx, start, end: start + HALF_DAY };
+  }
   const NotesBoard = {
-    items: Storage.load(KEYS.notes, [], v => Array.isArray(v) && v.every(n => n && typeof n.text === 'string' && typeof n.id === 'string')),
+    mode: 'local',                 // 'local' | 'shared'
+    localItems: Storage.load(KEYS.notes, [], v => Array.isArray(v) && v.every(n => n && typeof n.text === 'string' && typeof n.id === 'string')),
+    items: [],
+    mine: new Set(Storage.load(KEYS.myNotes, [], v => Array.isArray(v))),
+    lastPost: Number(Storage.load(KEYS.notePost, 0)) || 0,
     color: NOTE_COLORS[0],
-    add(text) {
-      const t = text.trim();
+    fs: null, db: null, unsub: null, windowKey: null,
+
+    configured() { return !!(FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.projectId); },
+    async connect() {
+      if (!this.configured()) return;
+      try {
+        const [appMod, fs] = await Promise.all([
+          import(FIREBASE_SDK + 'firebase-app.js'),
+          import(FIREBASE_SDK + 'firebase-firestore.js')
+        ]);
+        const app = appMod.initializeApp(FIREBASE_CONFIG);
+        this.fs = fs;
+        this.db = fs.getFirestore(app);
+        this.mode = 'shared';
+        this.subscribe();
+        this.cleanup();
+        // 每 30 秒更新倒數；跨過清空時間就換到新的軟木板
+        setInterval(() => {
+          if (this.mode !== 'shared') return;
+          if (boardWindow().key !== this.windowKey) { this.subscribe(); this.cleanup(); toast('軟木板已清空，新的 12 小時開始了'); }
+          this.renderMeta();
+        }, 30 * 1000);
+        this.render();
+      } catch (e) {
+        console.warn('共享軟木板無法連線，改用單機模式', e);
+        this.useLocal();
+      }
+    },
+    subscribe() {
+      const { collection, query, where, onSnapshot } = this.fs;
+      if (this.unsub) this.unsub();
+      const w = boardWindow();
+      this.windowKey = w.key;
+      this.items = [];
+      this.push3D();
+      this.unsub = onSnapshot(query(collection(this.db, 'notes'), where('period', '==', w.key)), snap => {
+        this.items = snap.docs.map(d => {
+          const v = d.data({ serverTimestamps: 'estimate' });
+          return {
+            id: d.id,
+            text: String(v.text || '').slice(0, 40),
+            color: NOTE_COLORS.includes(v.color) ? v.color : NOTE_COLORS[0],
+            nickname: String(v.nickname || '').slice(0, 12),
+            createdAt: v.createdAt && v.createdAt.toMillis ? v.createdAt.toMillis() : Date.now(),
+            mine: this.mine.has(d.id)
+          };
+        }).sort((a, b) => b.createdAt - a.createdAt).slice(0, 60);
+        this.render();
+        this.push3D();
+      }, err => {
+        console.warn(err);
+        this.useLocal('連不上共享軟木板，暫時改用單機模式');
+      });
+    },
+    // 刪除已過期的便條（免費方案沒有排程功能，由訪客的瀏覽器順手清理）
+    async cleanup() {
+      try {
+        const { collection, query, where, limit, getDocs, deleteDoc, Timestamp } = this.fs;
+        const snap = await getDocs(query(collection(this.db, 'notes'), where('expireAt', '<', Timestamp.now()), limit(30)));
+        snap.docs.forEach(d => deleteDoc(d.ref).catch(() => {}));
+      } catch { /* 清理失敗不影響使用 */ }
+    },
+    useLocal(msg) {
+      if (this.unsub) { this.unsub(); this.unsub = null; }
+      this.mode = 'local';
+      this.items = this.localItems;
+      if (msg) toast(msg, 'warn');
+      this.render();
+      this.push3D();
+    },
+    check(t) {
       if (!t) { toast('請先寫點內容', 'warn'); return false; }
-      if (this.items.length >= 6) { toast('軟木板貼滿了，先撕掉一張吧', 'warn'); return false; }
-      this.items.push({ id: 'n' + Date.now(), text: t, color: this.color });
-      this.save();
+      const low = t.toLowerCase();
+      if (BAD_WORDS.some(w => low.includes(w))) { toast('內容包含不適當的字詞，請修改後再貼', 'warn'); return false; }
+      return true;
+    },
+    async add(text) {
+      const t = String(text || '').trim();
+      if (!this.check(t)) return false;
+      if (this.mode === 'shared') {
+        const wait = POST_COOLDOWN - (Date.now() - this.lastPost);
+        if (wait > 0) { toast(`請稍等 ${Math.ceil(wait / 1000)} 秒再貼下一張`, 'warn'); return false; }
+        const { collection, addDoc, serverTimestamp, Timestamp } = this.fs;
+        const w = boardWindow();
+        $('noteAdd').disabled = true;
+        try {
+          const ref = await addDoc(collection(this.db, 'notes'), {
+            text: t,
+            color: this.color,
+            nickname: (ProfilePanel.data.nickname || '').trim().slice(0, 12),
+            period: w.key,
+            createdAt: serverTimestamp(),
+            expireAt: Timestamp.fromMillis(w.end)
+          });
+          this.mine.add(ref.id);
+          Storage.save(KEYS.myNotes, [...this.mine].slice(-50));
+          this.lastPost = Date.now();
+          Storage.save(KEYS.notePost, this.lastPost);
+          this.items.forEach(n => { n.mine = this.mine.has(n.id); });
+          this.render();
+          toast('便條貼上去了，大家都看得到');
+          return true;
+        } catch (e) {
+          console.warn(e);
+          toast('貼上失敗，請稍後再試', 'warn');
+          return false;
+        } finally {
+          $('noteAdd').disabled = false;
+        }
+      }
+      if (this.localItems.length >= 6) { toast('軟木板貼滿了，先撕掉一張吧', 'warn'); return false; }
+      this.localItems.push({ id: 'n' + Date.now(), text: t, color: this.color, nickname: (ProfilePanel.data.nickname || '').trim() });
+      this.saveLocal();
       toast('便條貼上去了');
       return true;
     },
-    remove(id) { this.items = this.items.filter(n => n.id !== id); this.save(); },
-    save() {
-      Storage.save(KEYS.notes, this.items);
+    remove(id) {
+      if (this.mode !== 'local') return;
+      this.localItems = this.localItems.filter(n => n.id !== id);
+      this.saveLocal();
+    },
+    saveLocal() {
+      Storage.save(KEYS.notes, this.localItems);
+      this.items = this.localItems;
       this.render();
-      if (window.Scene3D && window.Scene3D.ready) window.Scene3D.refreshNotes(this.items);
+      this.push3D();
+    },
+    push3D() { if (window.Scene3D && window.Scene3D.ready) window.Scene3D.refreshNotes(this.items); },
+    timeLeft() {
+      const ms = Math.max(0, boardWindow().end - Date.now());
+      const h = Math.floor(ms / 3600e3), m = Math.floor((ms % 3600e3) / 60e3);
+      return h ? `${h} 小時 ${m} 分` : `${m} 分`;
+    },
+    renderMeta() {
+      $('noteTitle').textContent = this.mode === 'shared' ? '共享軟木板' : '軟木板便條';
+      $('noteSub').textContent = this.mode === 'shared'
+        ? `所有訪客都看得到這面軟木板，每天 0:00 與 12:00（台灣時間）清空。距離下次清空還有 ${this.timeLeft()}。`
+        : '寫下想對自己說的話，會貼在自修室的軟木板上（最多 6 張）';
+      $('noteAdd').textContent = this.mode === 'shared' ? '貼給大家看' : '貼上便條';
     },
     render() {
+      this.renderMeta();
       $('noteColors').innerHTML = NOTE_COLORS.map(c =>
         `<button type="button" class="swatch" role="radio" aria-label="便條顏色" aria-checked="${c === this.color}" data-note-color="${c}" style="background:${c}"></button>`).join('');
       const list = $('noteList');
       list.innerHTML = '';
+      if (this.mode === 'shared' && !this.items.length) {
+        list.innerHTML = '<li class="note-empty">目前還沒有人貼便條，當第一個吧！</li>';
+      }
       this.items.forEach(n => {
         const li = document.createElement('li');
-        li.className = 'note-item'; li.style.background = n.color;
-        li.textContent = n.text;
-        const del = document.createElement('button');
-        del.setAttribute('aria-label', '撕掉這張便條'); del.textContent = '✕';
-        del.addEventListener('click', () => this.remove(n.id));
-        li.appendChild(del);
+        li.className = 'note-item' + (n.mine ? ' mine' : '');
+        li.style.background = n.color;
+        li.appendChild(document.createTextNode(n.text));
+        if (this.mode === 'shared') {
+          const by = document.createElement('span');
+          by.className = 'note-by';
+          by.textContent = `— ${n.nickname || '匿名同學'}${n.mine ? '（我的）' : ''}`;
+          li.appendChild(by);
+        } else {
+          const del = document.createElement('button');
+          del.setAttribute('aria-label', '撕掉這張便條'); del.textContent = '✕';
+          del.addEventListener('click', () => this.remove(n.id));
+          li.appendChild(del);
+        }
         list.appendChild(li);
       });
       $('noteCount').textContent = `${Array.from($('noteText').value).length}/40`;
     },
     init() {
+      this.items = this.localItems;
       $('noteColors').addEventListener('click', e => {
         const b = e.target.closest('[data-note-color]');
         if (b) { this.color = b.dataset.noteColor; this.render(); }
       });
       $('noteText').addEventListener('input', () => { $('noteCount').textContent = `${Array.from($('noteText').value).length}/40`; });
-      $('noteAdd').addEventListener('click', () => {
-        if (this.add($('noteText').value)) { $('noteText').value = ''; this.render(); }
+      $('noteAdd').addEventListener('click', async () => {
+        if (await this.add($('noteText').value)) { $('noteText').value = ''; this.render(); }
       });
       this.render();
+      this.connect();
     }
   };
 
@@ -1265,9 +1437,9 @@
     { title: '管理今天的待辦', art: icon('#C98DAE', '<path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2"/>'),
       items: ['輸入內容後按新增或 Enter', '勾選完成、按 ✕ 刪除，<b>拖曳</b>可以調整順序', '最上面的未完成項目，會顯示在專注計時器上'] },
     { title: '和場景互動', art: icon('#E8B04B', '<path d="M12 3l2.2 5.3L20 9l-4.4 3.8L17 19l-5-3-5 3 1.4-6.2L4 9l5.8-.7z"/>'),
-      items: ['同學頭上冒出 <b>Zzz</b> 時，點他叫醒，他會說一句話', '自修室：點<b>軟木板</b>寫便條，會貼在牆上', '咖啡廳：入座後點<b>吧檯</b>點一杯飲料', '圖書館：點櫃台的<b>館員</b>聊聊天'] },
+      items: ['同學頭上冒出 <b>Zzz</b> 時，點他叫醒，他會說一句話', NotesBoard.mode === 'shared' ? '自修室：點<b>軟木板</b>寫便條，<b>所有訪客都看得到</b>（每 12 小時清空）' : '自修室：點<b>軟木板</b>寫便條，會貼在牆上', '咖啡廳：入座後點<b>吧檯</b>點一杯飲料', '圖書館：點櫃台的<b>館員</b>聊聊天'] },
     { title: '準備好了嗎？', art: icon('#7FB0A6', '<path d="M5 13l4 4L19 7"/>'),
-      items: ['暱稱、待辦、便條與今日統計會保存在<b>這台裝置的瀏覽器</b>',
+      items: [NotesBoard.mode === 'shared' ? '暱稱、待辦與今日統計只存在<b>這台裝置的瀏覽器</b>；共享便條會公開給所有訪客' : '暱稱、待辦、便條與今日統計會保存在<b>這台裝置的瀏覽器</b>',
         Fullscreen.supported() ? '按右上角的<b>全螢幕</b>按鈕或鍵盤 F，更能沉浸在自習室裡' : '',
         '隨時可以按右上角的「玩法說明」再看一次', '祝你今天讀書順利！'].filter(Boolean) }
   ];
@@ -1389,6 +1561,7 @@
     focusTipShown: false,
     getProfile() { return ProfilePanel.data; },
     getNotes() { return NotesBoard.items; },
+    notesShared() { return NotesBoard.mode === 'shared'; },
     openNotes() { NotesBoard.render(); openModal('noteModal'); },
     openDrinks() {
       if (this.seatId === null) { toast('先入座，飲料才有地方放喔'); return; }
@@ -1847,7 +2020,7 @@ function boot() {
   setInterval(() => applyStudyTime(false), 60 * 1000);
 
   /* ---------- 軟木板便條 ---------- */
-  function noteTex(text, color) {
+  function noteTex(text, color, by) {
     return canvasTex(256, 256, (g, w, h) => {
       g.fillStyle = color; g.fillRect(0, 0, w, h);
       g.fillStyle = 'rgba(0,0,0,.06)'; g.fillRect(0, h - 18, w, 18);
@@ -1860,10 +2033,15 @@ function boot() {
       for (let i = 0; i < chars.length; i += per) lines.push(chars.slice(i, i + per).join(''));
       g.fillStyle = '#4A3728'; g.textAlign = 'center'; g.textBaseline = 'middle';
       g.font = `500 ${size}px "Noto Sans TC", "PingFang TC", sans-serif`;
-      const lh = size * 1.3, y0 = h / 2 + 8 - (lines.length - 1) * lh / 2;
+      const lh = size * 1.3, y0 = h / 2 + (by ? 0 : 8) - (lines.length - 1) * lh / 2;
       lines.forEach((l, i) => g.fillText(l, w / 2, y0 + i * lh));
+      if (by) {
+        g.font = '500 22px "Noto Sans TC", "PingFang TC", sans-serif'; g.fillStyle = '#8C7660';
+        g.fillText('— ' + by, w / 2, h - 36);
+      }
     });
   }
+  // 軟木板最多顯示最新 8 張（4 × 2）
   function refreshNotes(items) {
     if (!noteBoard) return;
     while (noteBoard.children.length) {
@@ -1871,14 +2049,15 @@ function boot() {
       if (c.material.map) c.material.map.dispose();
       noteBoard.remove(c);
     }
-    const list = items && items.length ? items
-      : [{ id: 'hint', text: '點我寫便條', color: '#FFE9A8' }, { id: 'd1', text: '', color: '#CFE3C2' }, { id: 'd2', text: '', color: '#C9DDF0' }];
+    const shared = window.App.notesShared && window.App.notesShared();
+    const list = items && items.length ? items.slice(0, 8)
+      : [{ id: 'hint', text: shared ? '點我寫便條，大家都看得到' : '點我寫便條', color: '#FFE9A8' }, { id: 'd1', text: '', color: '#CFE3C2' }, { id: 'd2', text: '', color: '#C9DDF0' }];
     list.forEach((n, i) => {
-      const col = i % 3, row = Math.floor(i / 3);
-      const m = new THREE.Mesh(new THREE.PlaneGeometry(0.56, 0.56),
-        new THREE.MeshToonMaterial({ map: noteTex(n.text, n.color), gradientMap: grad }));
+      const col = i % 4, row = Math.floor(i / 4);
+      const m = new THREE.Mesh(new THREE.PlaneGeometry(0.46, 0.46),
+        new THREE.MeshToonMaterial({ map: noteTex(n.text, n.color, shared && n.text ? (n.nickname || '匿名同學') : ''), gradientMap: grad }));
       let hsh = 0; for (const ch of n.id) hsh = (hsh * 31 + ch.charCodeAt(0)) % 997;
-      m.position.set(-0.72 + col * 0.72, 0.3 - row * 0.6, 0.06);
+      m.position.set(-0.78 + col * 0.52, 0.3 - row * 0.58, 0.06);
       m.rotation.z = ((hsh % 9) - 4) * 0.025;
       noteBoard.add(m);
     });
