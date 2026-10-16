@@ -279,6 +279,13 @@
     display: flex; align-items: center; gap: 6px; white-space: nowrap;
   }
   .help-btn:hover { filter: brightness(.96); }
+  .icon-btn {
+    border: 0; background: var(--soft); color: var(--ink);
+    width: 34px; height: 34px; border-radius: 999px; flex: none;
+    display: grid; place-items: center;
+  }
+  .icon-btn:hover { filter: brightness(.96); }
+  .icon-btn[hidden] { display: none; }
   .tour { width: min(440px, 100%); padding: 24px 22px 18px; text-align: center; }
   .tour-art {
     width: 76px; height: 76px; margin: 0 auto 14px; border-radius: 24px;
@@ -515,6 +522,9 @@
   </div>
   <nav class="tabs" id="sceneTabs" aria-label="選擇場景"></nav>
   <div class="topbar-stat">今日專注 <b id="topRounds">0</b> 輪</div>
+  <button class="icon-btn" id="fsBtn" aria-label="全螢幕（F）" title="全螢幕（F）" hidden>
+    <svg id="fsIcon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+  </button>
   <button class="help-btn" id="helpBtn" aria-label="玩法說明">
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9.5"/><path d="M9.5 9.3a2.6 2.6 0 0 1 5 .9c0 1.7-2.5 2.3-2.5 3.8"/><circle cx="12" cy="17.2" r=".6" fill="currentColor"/></svg>
     <span>玩法說明</span>
@@ -1257,7 +1267,9 @@
     { title: '和場景互動', art: icon('#E8B04B', '<path d="M12 3l2.2 5.3L20 9l-4.4 3.8L17 19l-5-3-5 3 1.4-6.2L4 9l5.8-.7z"/>'),
       items: ['同學頭上冒出 <b>Zzz</b> 時，點他叫醒，他會說一句話', '自修室：點<b>軟木板</b>寫便條，會貼在牆上', '咖啡廳：入座後點<b>吧檯</b>點一杯飲料', '圖書館：點櫃台的<b>館員</b>聊聊天'] },
     { title: '準備好了嗎？', art: icon('#7FB0A6', '<path d="M5 13l4 4L19 7"/>'),
-      items: ['暱稱、待辦、便條與今日統計會保存在<b>這台裝置的瀏覽器</b>', '隨時可以按右上角的「玩法說明」再看一次', '祝你今天讀書順利！'] }
+      items: ['暱稱、待辦、便條與今日統計會保存在<b>這台裝置的瀏覽器</b>',
+        Fullscreen.supported() ? '按右上角的<b>全螢幕</b>按鈕或鍵盤 F，更能沉浸在自習室裡' : '',
+        '隨時可以按右上角的「玩法說明」再看一次', '祝你今天讀書順利！'].filter(Boolean) }
   ];
   const Tour = {
     i: 0,
@@ -1311,6 +1323,54 @@
       });
       // 第一次進入時自動顯示
       if (!Storage.load(KEYS.tour, false)) setTimeout(() => this.open(0), 700);
+    }
+  };
+
+  /* ---------- 全螢幕 ---------- */
+  const Fullscreen = {
+    el: document.documentElement,
+    supported() { return !!(document.fullscreenEnabled || document.webkitFullscreenEnabled); },
+    active() { return !!(document.fullscreenElement || document.webkitFullscreenElement); },
+    toggle() {
+      try {
+        if (this.active()) {
+          const r = (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+          if (r && r.then) r.then(() => this.render(), () => {});
+        }
+        else {
+          const req = this.el.requestFullscreen || this.el.webkitRequestFullscreen;
+          const r = req.call(this.el);
+          if (r && r.then) r.then(() => this.render(), () => toast('瀏覽器不允許進入全螢幕', 'warn'));
+        }
+      } catch { toast('瀏覽器不允許進入全螢幕', 'warn'); }
+    },
+    render() {
+      const on = this.active();
+      $('fsIcon').innerHTML = on
+        ? '<path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/>'
+        : '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>';
+      const label = on ? '離開全螢幕（F 或 Esc）' : '全螢幕（F）';
+      $('fsBtn').setAttribute('aria-label', label);
+      $('fsBtn').title = label;
+    },
+    init() {
+      if (!this.supported()) return;           // iPhone Safari 等不支援的瀏覽器隱藏按鈕
+      $('fsBtn').hidden = false;
+      $('fsBtn').addEventListener('click', () => this.toggle());
+      ['fullscreenchange', 'webkitfullscreenchange'].forEach(ev => document.addEventListener(ev, () => {
+        this.render();
+        if (this.active()) toast('已進入全螢幕，按 F 或 Esc 離開');
+      }));
+      // 鍵盤 F 切換（在輸入框打字時不觸發）
+      document.addEventListener('keydown', e => {
+        if ((e.key !== 'f' && e.key !== 'F') || e.ctrlKey || e.metaKey || e.altKey) return;
+        const t = e.target;
+        if (t.closest && t.closest('input, textarea, [contenteditable]')) return;
+        if (document.querySelector('.modal-backdrop:not([hidden])')) return;
+        e.preventDefault();
+        this.toggle();
+      });
+      this.render();
     }
   };
 
@@ -1430,6 +1490,7 @@
       this.renderTabs();
       this.updateHint();
       NotesBoard.init();
+      Fullscreen.init();
       Tour.init();
       $('drinkGrid').innerHTML = DRINKS.map(d => `
         <button class="drink-btn" data-drink="${d.id}">
