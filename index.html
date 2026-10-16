@@ -1208,13 +1208,8 @@ const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/13.0.0/';
   const NOTE_COLORS = ['#FFE9A8', '#F8C9C0', '#CFE3C2', '#C9DDF0'];
   const BAD_WORDS = ['幹你', '幹您', '靠北', '靠杯', '白癡', '白痴', '智障', '去死', '雞掰', '機掰', '操你', '屌', '婊', '垃圾人', 'fuck', 'shit', 'bitch', 'damn'];
   const POST_COOLDOWN = 20 * 1000;
-  // 共享軟木板每 12 小時清空一次：台灣時間 0:00 與 12:00
-  const TW_OFFSET = 8 * 3600e3, HALF_DAY = 12 * 3600e3;
-  function boardWindow(now = Date.now()) {
-    const idx = Math.floor((now + TW_OFFSET) / HALF_DAY);
-    const start = idx * HALF_DAY - TW_OFFSET;
-    return { key: 'w' + idx, start, end: start + HALF_DAY };
-  }
+  // 共享軟木板一次顯示最新 50 則；沒超過 50 則就一直留著，貼出第 51 則時最舊的一則從畫面上移除
+  const NOTE_LIST_MAX = 50;
   const NotesBoard = {
     mode: 'local',                 // 'local' | 'shared'
     localItems: Storage.load(KEYS.notes, [], v => Array.isArray(v) && v.every(n => n && typeof n.text === 'string' && typeof n.id === 'string')),
@@ -1222,7 +1217,7 @@ const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/13.0.0/';
     mine: new Set(Storage.load(KEYS.myNotes, [], v => Array.isArray(v))),
     lastPost: Number(Storage.load(KEYS.notePost, 0)) || 0,
     color: NOTE_COLORS[0],
-    fs: null, db: null, unsub: null, windowKey: null,
+    fs: null, db: null, unsub: null,
 
     configured() { return !!(FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.projectId); },
     async connect() {
@@ -1237,13 +1232,6 @@ const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/13.0.0/';
         this.db = fs.getFirestore(app);
         this.mode = 'shared';
         this.subscribe();
-        this.cleanup();
-        // 每 30 秒更新倒數；跨過清空時間就換到新的軟木板
-        setInterval(() => {
-          if (this.mode !== 'shared') return;
-          if (boardWindow().key !== this.windowKey) { this.subscribe(); this.cleanup(); toast('軟木板已清空，新的 12 小時開始了'); }
-          this.renderMeta();
-        }, 30 * 1000);
         this.render();
       } catch (e) {
         console.warn('共享軟木板無法連線，改用單機模式', e);
@@ -1251,13 +1239,12 @@ const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/13.0.0/';
       }
     },
     subscribe() {
-      const { collection, query, where, onSnapshot } = this.fs;
+      const { collection, query, orderBy, limit, onSnapshot } = this.fs;
       if (this.unsub) this.unsub();
-      const w = boardWindow();
-      this.windowKey = w.key;
       this.items = [];
       this.push3D();
-      this.unsub = onSnapshot(query(collection(this.db, 'notes'), where('period', '==', w.key)), snap => {
+      // 只訂閱最新的 50 則：第 51 則出現時，最舊的一則會自動離開查詢結果
+      this.unsub = onSnapshot(query(collection(this.db, 'notes'), orderBy('createdAt', 'desc'), limit(NOTE_LIST_MAX)), snap => {
         this.items = snap.docs.map(d => {
           const v = d.data({ serverTimestamps: 'estimate' });
           return {
@@ -1268,21 +1255,13 @@ const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/13.0.0/';
             createdAt: v.createdAt && v.createdAt.toMillis ? v.createdAt.toMillis() : Date.now(),
             mine: this.mine.has(d.id)
           };
-        }).sort((a, b) => b.createdAt - a.createdAt).slice(0, 60);
+        }).sort((a, b) => b.createdAt - a.createdAt).slice(0, NOTE_LIST_MAX);   // 新到舊排序，只留最新 50 則
         this.render();
         this.push3D();
       }, err => {
         console.warn(err);
         this.useLocal('連不上共享軟木板，暫時改用單機模式');
       });
-    },
-    // 刪除已過期的便條（免費方案沒有排程功能，由訪客的瀏覽器順手清理）
-    async cleanup() {
-      try {
-        const { collection, query, where, limit, getDocs, deleteDoc, Timestamp } = this.fs;
-        const snap = await getDocs(query(collection(this.db, 'notes'), where('expireAt', '<', Timestamp.now()), limit(30)));
-        snap.docs.forEach(d => deleteDoc(d.ref).catch(() => {}));
-      } catch { /* 清理失敗不影響使用 */ }
     },
     useLocal(msg) {
       if (this.unsub) { this.unsub(); this.unsub = null; }
@@ -1304,17 +1283,14 @@ const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/13.0.0/';
       if (this.mode === 'shared') {
         const wait = POST_COOLDOWN - (Date.now() - this.lastPost);
         if (wait > 0) { toast(`請稍等 ${Math.ceil(wait / 1000)} 秒再貼下一張`, 'warn'); return false; }
-        const { collection, addDoc, serverTimestamp, Timestamp } = this.fs;
-        const w = boardWindow();
+        const { collection, addDoc, serverTimestamp } = this.fs;
         $('noteAdd').disabled = true;
         try {
           const ref = await addDoc(collection(this.db, 'notes'), {
             text: t,
             color: this.color,
             nickname: (ProfilePanel.data.nickname || '').trim().slice(0, 12),
-            period: w.key,
-            createdAt: serverTimestamp(),
-            expireAt: Timestamp.fromMillis(w.end)
+            createdAt: serverTimestamp()
           });
           this.mine.add(ref.id);
           Storage.save(KEYS.myNotes, [...this.mine].slice(-50));
@@ -1350,15 +1326,10 @@ const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/13.0.0/';
       this.push3D();
     },
     push3D() { if (window.Scene3D && window.Scene3D.ready) window.Scene3D.refreshNotes(this.items); },
-    timeLeft() {
-      const ms = Math.max(0, boardWindow().end - Date.now());
-      const h = Math.floor(ms / 3600e3), m = Math.floor((ms % 3600e3) / 60e3);
-      return h ? `${h} 小時 ${m} 分` : `${m} 分`;
-    },
     renderMeta() {
       $('noteTitle').textContent = this.mode === 'shared' ? '共享軟木板' : '軟木板便條';
       $('noteSub').textContent = this.mode === 'shared'
-        ? `所有訪客都看得到這面軟木板，每天 0:00 與 12:00（台灣時間）清空。距離下次清空還有 ${this.timeLeft()}。`
+        ? `所有訪客都看得到這面軟木板，一次顯示最新 ${NOTE_LIST_MAX} 則；貼滿後再有新便條，最舊的一則就會被擠下來。`
         : '寫下想對自己說的話，會貼在自修室的軟木板上（最多 6 張）';
       $('noteAdd').textContent = this.mode === 'shared' ? '貼給大家看' : '貼上便條';
     },
@@ -1437,7 +1408,7 @@ const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/13.0.0/';
     { title: '管理今天的待辦', art: icon('#C98DAE', '<path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2"/>'),
       items: ['輸入內容後按新增或 Enter', '勾選完成、按 ✕ 刪除，<b>拖曳</b>可以調整順序', '最上面的未完成項目，會顯示在專注計時器上'] },
     { title: '和場景互動', art: icon('#E8B04B', '<path d="M12 3l2.2 5.3L20 9l-4.4 3.8L17 19l-5-3-5 3 1.4-6.2L4 9l5.8-.7z"/>'),
-      items: ['同學頭上冒出 <b>Zzz</b> 時，點他叫醒，他會說一句話', NotesBoard.mode === 'shared' ? '自修室：點<b>軟木板</b>寫便條，<b>所有訪客都看得到</b>（每 12 小時清空）' : '自修室：點<b>軟木板</b>寫便條，會貼在牆上', '咖啡廳：入座後點<b>吧檯</b>點一杯飲料', '圖書館：點櫃台的<b>館員</b>聊聊天'] },
+      items: ['同學頭上冒出 <b>Zzz</b> 時，點他叫醒，他會說一句話', NotesBoard.mode === 'shared' ? '自修室：點<b>軟木板</b>寫便條，<b>所有訪客都看得到</b>（最多顯示最新 50 則）' : '自修室：點<b>軟木板</b>寫便條，會貼在牆上', '咖啡廳：入座後點<b>吧檯</b>點一杯飲料', '圖書館：點櫃台的<b>館員</b>聊聊天'] },
     { title: '準備好了嗎？', art: icon('#7FB0A6', '<path d="M5 13l4 4L19 7"/>'),
       items: [NotesBoard.mode === 'shared' ? '暱稱、待辦與今日統計只存在<b>這台裝置的瀏覽器</b>；共享便條會公開給所有訪客' : '暱稱、待辦、便條與今日統計會保存在<b>這台裝置的瀏覽器</b>',
         Fullscreen.supported() ? '按右上角的<b>全螢幕</b>按鈕或鍵盤 F，更能沉浸在自習室裡' : '',
