@@ -1773,12 +1773,15 @@ if (THREE) {
 
 function boot() {
   const isMobile = matchMedia('(max-width: 900px)').matches || /Mobi|Android/i.test(navigator.userAgent);
+  // 平板（含桌面版 UA 的 iPad）：觸控為主、螢幕解析度高，同樣降低渲染成本，拖曳畫面才會順
+  const isTablet = navigator.maxTouchPoints > 1 && matchMedia('(pointer: coarse)').matches;
+  const lowPower = isMobile || isTablet;
 
   /* ---------- Renderer ---------- */
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-  renderer.setPixelRatio(Math.min(devicePixelRatio, isMobile ? 1.5 : 2));
+  renderer.setPixelRatio(Math.min(devicePixelRatio, lowPower ? 1.5 : 2));
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.shadowMap.type = lowPower ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
   stage.prepend(renderer.domElement);
 
   const labelRenderer = new CSS2DRenderer({ element: document.getElementById('labelLayer') });
@@ -1815,7 +1818,7 @@ function boot() {
   const sun = new THREE.DirectionalLight(0xffe6c2, 1.7);
   sun.position.set(-4, 11, 8);
   sun.castShadow = true;
-  sun.shadow.mapSize.set(isMobile ? 1024 : 2048, isMobile ? 1024 : 2048);
+  sun.shadow.mapSize.set(lowPower ? 1024 : 2048, lowPower ? 1024 : 2048);
   Object.assign(sun.shadow.camera, { left: -10, right: 10, top: 10, bottom: -10, near: 1, far: 40 });
   sun.shadow.bias = -0.0005;
   sun.shadow.normalBias = 0.03;
@@ -3769,10 +3772,13 @@ function boot() {
     camMode = mode;
     view.panX = view.panY = 0;
     view.recentering = false;
+    view.vx = view.vy = 0;
+    // 近景時手指拖曳只用來移動畫面，不會變成捲動網頁而中斷
+    renderer.domElement.style.touchAction = mode === 'close' ? 'none' : '';
     updateGoal();
     notifyPan();
   }
-  function recenter() { view.recentering = true; }
+  function recenter() { view.recentering = true; view.vx = view.vy = 0; }
   function applyView() {
     if (!view.cur) return;
     view.panX = Math.max(view.range.x0, Math.min(view.range.x1, view.panX));
@@ -3789,6 +3795,15 @@ function boot() {
       view.panX -= view.panX * k; view.panY -= view.panY * k;
       if (Math.hypot(view.panX, view.panY) < 0.01) { view.panX = view.panY = 0; view.recentering = false; }
       notifyPan();
+    } else if (!drag && (view.vx || view.vy)) {
+      // 慣性：依放開時的速度繼續滑動，再逐漸減速；碰到教室邊界就停在那個方向
+      view.panX += view.vx * dt; view.panY += view.vy * dt;
+      const f = Math.exp(-dt * 4.2);
+      view.vx *= f; view.vy *= f;
+      if (view.panX <= view.range.x0 || view.panX >= view.range.x1) view.vx = 0;
+      if (view.panY <= view.range.y0 || view.panY >= view.range.y1) view.vy = 0;
+      if (Math.hypot(view.vx, view.vy) < 0.05) view.vx = view.vy = 0;
+      notifyPan();
     }
     applyView();
     // 拉近時吊燈淡出
@@ -3796,34 +3811,58 @@ function boot() {
     lampParts.forEach(m => { m.material.opacity = view.lamp; m.visible = view.lamp > 0.02; });
   }
   // 拖曳平移：入座後的近景（專注模式）可拖曳環顧教室；手機全景也可左右拖曳
+  // 只跟隨第一根手指；放開後依最後的速度做慣性滑動
   let drag = null, dragged = false;
+  view.vx = view.vy = 0;
+  const endDrag = (e, cancelled) => {
+    if (!drag || (e && e.pointerId !== drag.id)) return;
+    if (dragged) {
+      renderer.domElement.style.cursor = canPick() ? 'default' : 'grab';
+      // 用最近約 100ms 的移動估算速度
+      const now = performance.now(), s = drag.samples.filter(p => now - p.t < 100);
+      if (!cancelled && s.length > 1 && now - s[s.length - 1].t < 60) {
+        const a = s[0], z = s[s.length - 1], sec = Math.max(0.016, (z.t - a.t) / 1000);
+        view.vx = (z.x - a.x) / sec; view.vy = (z.y - a.y) / sec;
+        const sp = Math.hypot(view.vx, view.vy), max = view.cur.hw * 4;
+        if (sp > max) { view.vx *= max / sp; view.vy *= max / sp; }
+      }
+    }
+    try { renderer.domElement.releasePointerCapture(drag.id); } catch { /* 已釋放 */ }
+    drag = null;
+  };
   renderer.domElement.addEventListener('pointerdown', e => {
+    if (drag) return;                      // 第二根手指不接手拖曳
     dragged = false;
+    view.vx = view.vy = 0;                 // 手指按下就停住慣性
     if (e.button !== 0 || !canPan()) return;
     view.recentering = false;
-    drag = { x: e.clientX, y: e.clientY, px: view.panX, py: view.panY };
+    drag = { id: e.pointerId, x: e.clientX, y: e.clientY, px: view.panX, py: view.panY, samples: [] };
+    try { renderer.domElement.setPointerCapture(e.pointerId); } catch { /* 不支援時改由 window 監聽 */ }
   });
   window.addEventListener('pointermove', e => {
-    if (!drag) return;
-    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
-    if (!dragged && Math.hypot(dx, dy) > 8) {
+    if (!drag || e.pointerId !== drag.id) return;
+    let dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (!dragged) {
+      if (Math.hypot(dx, dy) <= (e.pointerType === 'mouse' ? 8 : 6)) return;
       dragged = true;
+      // 從越過門檻的位置開始跟手，畫面不會突然跳一下
+      drag.x = e.clientX; drag.y = e.clientY; dx = dy = 0;
       renderer.domElement.style.cursor = 'grabbing';
       tooltip.classList.remove('show');
       setHover(null);
+      document.getElementById('panTip').style.display = 'none';
     }
-    if (!dragged) return;
     const unit = (view.cur.hw * 2) / stage.clientWidth;
     view.panX = drag.px - dx * unit;
     view.panY = drag.py + dy * unit;
-    applyView();
+    applyView();                           // 夾在教室範圍內
+    const now = performance.now();
+    drag.samples.push({ t: now, x: view.panX, y: view.panY });
+    if (drag.samples.length > 8) drag.samples.shift();
     notifyPan();
-    document.getElementById('panTip').style.display = 'none';
   });
-  window.addEventListener('pointerup', () => {
-    if (drag && dragged) renderer.domElement.style.cursor = canPick() ? 'default' : 'grab';
-    drag = null;
-  });
+  window.addEventListener('pointerup', e => endDrag(e, false));
+  window.addEventListener('pointercancel', e => endDrag(e, true));
   new ResizeObserver(fitCamera).observe(stage);
 
   /* ---------- 動畫迴圈 ---------- */
