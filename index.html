@@ -1490,7 +1490,7 @@ const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/13.0.0/';
     { title: '開始專注', art: icon('#6E9CC4', '<circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2M9 2h6"/>'),
       items: ['按番茄鐘的<b>開始</b>進入專注模式，畫面只留精簡計時器',
         canHoverDevice() ? '面板會收到右側，<b>滑鼠移到右邊緣</b>就會展開' : '面板會收到右側，<b>點「面板」把手</b>就能展開',
-        '<b>拖曳畫面</b>可環顧教室，按「回到座位」就回來', '完成一輪會撒彩帶慶祝，附近同學也會幫你加油'] },
+        canHoverDevice() ? '<b>拖曳畫面</b>可環顧教室，<b>滾輪</b>可放大縮小，按「回到座位」就回來' : '<b>拖曳畫面</b>可環顧教室，<b>雙指捏合</b>可放大縮小，按「回到座位」就回來', '完成一輪會撒彩帶慶祝，附近同學也會幫你加油'] },
     { title: '管理今天的待辦', art: icon('#C98DAE', '<path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2"/>'),
       items: ['輸入內容後按新增或 Enter', '勾選完成、按 ✕ 刪除，<b>拖曳</b>可以調整順序', '最上面的未完成項目，會顯示在專注計時器上'] },
     { title: '和場景互動', art: icon('#E8B04B', '<path d="M12 3l2.2 5.3L20 9l-4.4 3.8L17 19l-5-3-5 3 1.4-6.2L4 9l5.8-.7z"/>'),
@@ -1661,7 +1661,7 @@ const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/13.0.0/';
       if (document.activeElement && $('panel').contains(document.activeElement)) document.activeElement.blur();
       if (on && !this.focusTipShown) {
         this.focusTipShown = true;
-        toast(matchMedia('(hover: hover)').matches ? '專注模式：拖曳畫面可環顧教室，滑鼠移到右側邊緣可展開面板' : '專注模式：拖曳畫面可環顧教室，點右側「面板」可展開');
+        toast(matchMedia('(hover: hover)').matches ? '專注模式：拖曳畫面可環顧教室、滾輪可縮放，滑鼠移到右側邊緣可展開面板' : '專注模式：拖曳畫面可環顧教室、雙指可縮放，點右側「面板」可展開');
       }
     },
     updateHint() {
@@ -3760,6 +3760,7 @@ function boot() {
     bounds: { minX: -10, maxX: 10, minY: -10, maxY: 10 },   // 整間教室在鏡頭座標中的範圍
     range: { x0: 0, x1: 0, y0: 0, y1: 0 },                  // 目前可平移的範圍
     panX: 0, panY: 0,
+    zoom: 1, zMin: 1, zMax: 2.2,                            // 近景縮放倍率（1 = 預設近景）
     recentering: false,
     lamp: 1
   };
@@ -3802,8 +3803,12 @@ function boot() {
       const v = new THREE.Vector3(playerSeat.pos.x, 0.95, playerSeat.pos.z).applyMatrix4(camera.matrixWorldInverse);
       let hh = 2.4, hw = hh * aspect;
       if (hw < 2.9) { hw = 2.9; hh = hw / aspect; }
+      // 縮放範圍：最多放大 2.2 倍；縮小到畫面任一邊碰到教室邊界為止
+      const b = view.bounds;
+      view.zMin = Math.min(1, Math.max(hw / ((b.maxX - b.minX) / 2), hh / ((b.maxY - b.minY) / 2)));
+      view.zoom = Math.max(view.zMin, Math.min(view.zMax, view.zoom));
       // 鏡頭中心略往上，讓角色落在畫面中下方，不被上方計時器擋住
-      view.goal = { cx: v.x, cy: v.y + hh * (aspect < 1 ? 0.22 : 0.08), hw, hh };
+      view.goal = { cx: v.x, cy: v.y + hh * (aspect < 1 ? 0.22 : 0.08), hw: hw / view.zoom, hh: hh / view.zoom };
     } else {
       const B = view.base;
       view.goal = { cx: B.cx, cy: B.cy, hw: B.hw, hh: B.hh };
@@ -3815,19 +3820,22 @@ function boot() {
       if (a > z) a = z = (a + z) / 2;
       return [Math.min(a, 0), Math.max(z, 0)];
     };
-    [view.range.x0, view.range.x1] = axis(b.minX, b.maxX, g.cx, g.hw);
-    [view.range.y0, view.range.y1] = axis(b.minY, b.maxY, g.cy, g.hh);
+    // 縮小過渡中以較小的畫面範圍計算，避免平移被突然夾回而跳動
+    const hw = view.cur ? Math.min(g.hw, view.cur.hw) : g.hw, hh = view.cur ? Math.min(g.hh, view.cur.hh) : g.hh;
+    [view.range.x0, view.range.x1] = axis(b.minX, b.maxX, g.cx, hw);
+    [view.range.y0, view.range.y1] = axis(b.minY, b.maxY, g.cy, hh);
     document.getElementById('panTip').style.display = camMode === 'overview' && canPan() && view.range.x1 - view.range.x0 > 1 ? 'block' : 'none';
   }
   const canPan = () => view.range.x1 - view.range.x0 > 0.05 || view.range.y1 - view.range.y0 > 0.05;
   let lastPanned = false;
   function notifyPan() {
-    const panned = camMode === 'close' && Math.hypot(view.panX, view.panY) > 0.3;
+    const panned = camMode === 'close' && (Math.hypot(view.panX, view.panY) > 0.3 || Math.abs(view.zoom - 1) > 0.05);
     if (panned !== lastPanned) { lastPanned = panned; window.App.onPanChanged(panned); }
   }
   function setCamMode(mode) {
     camMode = mode;
     view.panX = view.panY = 0;
+    view.zoom = 1;
     view.recentering = false;
     view.vx = view.vy = 0;
     // 近景時手指拖曳只用來移動畫面，不會變成捲動網頁而中斷
@@ -3835,7 +3843,8 @@ function boot() {
     updateGoal();
     notifyPan();
   }
-  function recenter() { view.recentering = true; view.vx = view.vy = 0; }
+  // 回到座位：平移與縮放都平滑回到預設
+  function recenter() { view.recentering = true; view.vx = view.vy = 0; view.zoom = 1; updateGoal(); }
   function applyView() {
     if (!view.cur) return;
     view.panX = Math.max(view.range.x0, Math.min(view.range.x1, view.panX));
@@ -3850,7 +3859,7 @@ function boot() {
     ['cx', 'cy', 'hw', 'hh'].forEach(key => { view.cur[key] += (view.goal[key] - view.cur[key]) * k; });
     if (view.recentering) {
       view.panX -= view.panX * k; view.panY -= view.panY * k;
-      if (Math.hypot(view.panX, view.panY) < 0.01) { view.panX = view.panY = 0; view.recentering = false; }
+      if (Math.hypot(view.panX, view.panY) < 0.01 && Math.abs(view.cur.hw - view.goal.hw) < 0.01) { view.panX = view.panY = 0; view.recentering = false; updateGoal(); }
       notifyPan();
     } else if (!drag && (view.vx || view.vy)) {
       // 慣性：依放開時的速度繼續滑動，再逐漸減速；碰到教室邊界就停在那個方向
@@ -3873,6 +3882,7 @@ function boot() {
   view.vx = view.vy = 0;
   const endDrag = (e, cancelled) => {
     if (!drag || (e && e.pointerId !== drag.id)) return;
+    if (!e) dragged = true;
     if (dragged) {
       renderer.domElement.style.cursor = canPick() ? 'default' : 'grab';
       // 用最近約 100ms 的移動估算速度
@@ -3887,7 +3897,56 @@ function boot() {
     try { renderer.domElement.releasePointerCapture(drag.id); } catch { /* 已釋放 */ }
     drag = null;
   };
+  // 縮放：以指定的螢幕位置為中心放大縮小，該點下方的物件會留在手指／游標下
+  function zoomAt(factor, clientX, clientY) {
+    if (camMode !== 'close' || !view.cur) return;
+    const z0 = view.zoom, z1 = Math.max(view.zMin, Math.min(view.zMax, z0 * factor));
+    if (Math.abs(z1 - z0) < 1e-4) return;
+    const rect = stage.getBoundingClientRect();
+    const ox = ((clientX - rect.left) / rect.width) * 2 - 1, oy = 1 - ((clientY - rect.top) / rect.height) * 2;
+    const hw0 = view.cur.hw, hh0 = view.cur.hh;
+    view.zoom = z1;
+    view.recentering = false;
+    view.vx = view.vy = 0;
+    updateGoal();
+    view.cur.hw = view.goal.hw; view.cur.hh = view.goal.hh;   // 縮放直接跟手，不做延遲
+    view.panX += ox * (hw0 - view.cur.hw);
+    view.panY += oy * (hh0 - view.cur.hh);
+    applyView();
+    notifyPan();
+    tooltip.classList.remove('show');
+    document.getElementById('panTip').style.display = 'none';
+  }
+  // 電腦：滑鼠滾輪或觸控板雙指縮放（只在入座後的近景）
+  renderer.domElement.addEventListener('wheel', e => {
+    if (camMode !== 'close') return;       // 全景時不攔截，網頁照常捲動
+    e.preventDefault();
+    const dy = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1);
+    zoomAt(Math.exp(-dy * (e.ctrlKey ? 0.01 : 0.0015)), e.clientX, e.clientY);
+  }, { passive: false });
+  // 手機與平板：雙指捏合縮放，同時可移動畫面
+  const touches = new Map();
+  let pinch = null;
+  const pinchInfo = () => {
+    const [a, b] = [...touches.values()];
+    return { d: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)), mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 };
+  };
   renderer.domElement.addEventListener('pointerdown', e => {
+    if (e.pointerType !== 'mouse') {
+      touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (touches.size === 2 && camMode === 'close') {
+        if (drag) endDrag(null, true);       // 第一根手指的拖曳改成捏合，不產生慣性
+        dragged = true;                      // 放開後不當成點擊
+        view.vx = view.vy = 0;
+        view.recentering = false;
+        const p = pinchInfo();
+        pinch = { d0: p.d, z0: view.zoom, mx: p.mx, my: p.my };
+        tooltip.classList.remove('show');
+        setHover(null);
+        return;
+      }
+      if (touches.size > 1) return;
+    }
     if (drag) return;                      // 第二根手指不接手拖曳
     dragged = false;
     view.vx = view.vy = 0;                 // 手指按下就停住慣性
@@ -3897,6 +3956,18 @@ function boot() {
     try { renderer.domElement.setPointerCapture(e.pointerId); } catch { /* 不支援時改由 window 監聽 */ }
   });
   window.addEventListener('pointermove', e => {
+    if (touches.has(e.pointerId)) touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pinch && touches.size >= 2) {
+      const p = pinchInfo();
+      zoomAt((pinch.z0 * p.d / pinch.d0) / view.zoom, p.mx, p.my);
+      const unit = (view.cur.hw * 2) / stage.clientWidth;   // 兩指一起移動時平移畫面
+      view.panX -= (p.mx - pinch.mx) * unit;
+      view.panY += (p.my - pinch.my) * unit;
+      pinch.mx = p.mx; pinch.my = p.my;
+      applyView();
+      notifyPan();
+      return;
+    }
     if (!drag || e.pointerId !== drag.id) return;
     let dx = e.clientX - drag.x, dy = e.clientY - drag.y;
     if (!dragged) {
@@ -3918,8 +3989,12 @@ function boot() {
     if (drag.samples.length > 8) drag.samples.shift();
     notifyPan();
   });
-  window.addEventListener('pointerup', e => endDrag(e, false));
-  window.addEventListener('pointercancel', e => endDrag(e, true));
+  const releaseTouch = e => {
+    touches.delete(e.pointerId);
+    if (pinch && touches.size < 2) pinch = null;   // 剩下的手指不會接著拖曳，放開重按即可
+  };
+  window.addEventListener('pointerup', e => { releaseTouch(e); endDrag(e, false); });
+  window.addEventListener('pointercancel', e => { releaseTouch(e); endDrag(e, true); });
   new ResizeObserver(fitCamera).observe(stage);
 
   /* ---------- 動畫迴圈 ---------- */
