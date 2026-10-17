@@ -264,6 +264,8 @@
     box-shadow: 0 2px 6px rgba(0,0,0,.12);
   }
   .note-item .note-by { display: block; margin-top: 6px; font-size: 11px; color: #8C7660; }
+  .note-item .note-time { display: block; margin-top: 2px; font-size: 11px; color: #A08A72; }
+  .note-item .note-by + .note-time { margin-top: 0; }
   .note-item.mine { box-shadow: 0 0 0 2px #E0775A, 0 2px 6px rgba(0,0,0,.12); }
   .note-empty { grid-column: 1 / -1; text-align: center; color: var(--muted); font-size: 13px; padding: 6px 0; }
   .note-item button { position: absolute; top: 4px; right: 4px; border: 0; background: transparent; color: #8C7660; width: 22px; height: 22px; border-radius: 6px; }
@@ -722,7 +724,8 @@ const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/13.0.0/';
     notes: 'studyroom.notes',
     myNotes: 'studyroom.myNotes',
     notePost: 'studyroom.notePost',
-    tour: 'studyroom.tour'
+    tour: 'studyroom.tour',
+    timer: 'studyroom.timer'
   };
   const Storage = {
     available: (() => {
@@ -905,6 +908,7 @@ const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/13.0.0/';
       if (this.running) return;
       this.endAt = Date.now() + this.remaining * 1000;
       this.running = true;
+      this.persist();
       this.render();
     },
     pause() {
@@ -912,6 +916,7 @@ const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/13.0.0/';
       this.remaining = Math.max(0, Math.ceil((this.endAt - Date.now()) / 1000));
       this.running = false;
       this.endAt = null;
+      this.persist();
       this.render();
       // 專注中暫停太久，附近同學會關心一下
       clearTimeout(this.pauseNag);
@@ -927,6 +932,7 @@ const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/13.0.0/';
       this.endAt = null;
       this.focusCount = 0;
       this.setPhase('focus');
+      this.persist();
       this.render();
     },
     skip() { this.nextPhase(true); },
@@ -959,7 +965,37 @@ const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/13.0.0/';
       } else {
         toast('已跳過' + PHASES[prev].label);
       }
+      this.persist();
       this.render();
+    },
+    // 保存目前的計時狀態：重新整理或關掉再開，都能接續
+    persist() {
+      Storage.save(KEYS.timer, {
+        phase: this.phase, running: this.running, endAt: this.endAt,
+        remaining: this.remaining, phaseTotal: this.phaseTotal, focusCount: this.focusCount
+      });
+    },
+    // 開啟網頁時還原；回傳還原的情況供提示用
+    restore() {
+      const st = Storage.load(KEYS.timer, null, v => v && PHASES[v.phase] && Number.isInteger(v.focusCount) &&
+        v.focusCount >= 0 && v.focusCount <= 4 && Number.isFinite(v.phaseTotal) && v.phaseTotal > 0 && v.phaseTotal <= 120 * 60);
+      if (!st) return null;
+      this.phase = st.phase;
+      this.phaseTotal = st.phaseTotal;
+      this.focusCount = st.focusCount;
+      if (st.running && Number.isFinite(st.endAt)) {
+        const left = (st.endAt - Date.now()) / 1000;
+        if (left > 0) {                       // 還沒結束：用原本的結束時間繼續計時
+          this.running = true; this.endAt = st.endAt; this.remaining = Math.ceil(left);
+          return 'running';
+        }
+        if (-left < 3600) { this.remaining = 0; return 'finished'; }   // 離開期間剛好結束（1 小時內）：照常完成這一段
+        this.setPhase(st.phase);              // 結束超過 1 小時：視為沒在讀書，這一段重新開始、不計入統計
+        return 'expired';
+      }
+      this.remaining = Math.min(this.phaseTotal, Math.max(0, Math.round(Number(st.remaining) || 0)));
+      if (this.remaining === 0) this.remaining = this.phaseTotal;
+      return this.remaining === this.phaseTotal && this.phase === 'focus' && this.focusCount === 0 ? null : 'paused';
     },
     started() {
       return this.running || !(this.phase === 'focus' && this.focusCount === 0 && this.remaining === this.phaseTotal);
@@ -968,6 +1004,7 @@ const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/13.0.0/';
       // 尚未開始的階段立即套用新時間；進行中或暫停中的階段下一輪才套用
       if (!this.running && this.remaining === this.phaseTotal) this.setPhase(this.phase);
       Storage.save(KEYS.timerSettings, this.settings);
+      this.persist();
       this.render();
     },
     render() {
@@ -999,6 +1036,8 @@ const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/13.0.0/';
     },
     init() {
       this.setPhase('focus');
+      const restored = this.restore();
+      this.persist();                     // 把還原後的狀態寫回，避免下次又重複提示
       $('setFocus').value = this.settings.focus;
       $('setShort').value = this.settings.shortBreak;
       $('setLong').value = this.settings.longBreak;
@@ -1017,6 +1056,17 @@ const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/13.0.0/';
       });
       setInterval(() => this.tick(), 250);
       this.render();
+      // 重新整理後的提示
+      if (restored === 'running') {
+        const m = Math.floor(this.remaining / 60), s = this.remaining % 60;
+        toast(`已接續上次的${PHASES[this.phase].label}，還剩 ${m}:${String(s).padStart(2, '0')}`);
+      } else if (restored === 'finished') {
+        this.nextPhase(false);            // 照常完成：專注會計入今日統計，並切到下一段
+      } else if (restored === 'expired') {
+        toast('上次的計時已結束很久，這一段重新開始');
+      } else if (restored === 'paused') {
+        toast('已還原暫停中的番茄鐘，按繼續就能接著計時');
+      }
     }
   };
 
@@ -1210,6 +1260,23 @@ const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/13.0.0/';
   const POST_COOLDOWN = 20 * 1000;
   // 共享軟木板一次顯示最新 50 則；沒超過 50 則就一直留著，貼出第 51 則時最舊的一則從畫面上移除
   const NOTE_LIST_MAX = 50;
+  // 便條的張貼時間：剛剛、N 分鐘前、N 小時前、昨天 HH:mm、M/D HH:mm
+  function noteTime(ts, now = Date.now()) {
+    const d = new Date(ts), diff = Math.max(0, now - ts);
+    const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    if (diff < 60e3) return '剛剛';
+    if (diff < 3600e3) return `${Math.floor(diff / 60e3)} 分鐘前`;
+    const today = new Date(now); today.setHours(0, 0, 0, 0);
+    if (ts >= today.getTime()) return `${Math.floor(diff / 3600e3)} 小時前`;
+    if (ts >= today.getTime() - 86400e3) return `昨天 ${hm}`;
+    return `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
+  }
+  const noteFullTime = ts => {
+    const d = new Date(ts);
+    return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  };
+  // 舊版單機便條沒有 createdAt，從 id（'n' + 時間戳）推回張貼時間
+  const noteTs = n => Number.isFinite(n.createdAt) ? n.createdAt : (Number(String(n.id).slice(1)) || null);
   const NotesBoard = {
     mode: 'local',                 // 'local' | 'shared'
     localItems: Storage.load(KEYS.notes, [], v => Array.isArray(v) && v.every(n => n && typeof n.text === 'string' && typeof n.id === 'string')),
@@ -1309,7 +1376,7 @@ const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/13.0.0/';
         }
       }
       if (this.localItems.length >= 6) { toast('軟木板貼滿了，先撕掉一張吧', 'warn'); return false; }
-      this.localItems.push({ id: 'n' + Date.now(), text: t, color: this.color, nickname: (ProfilePanel.data.nickname || '').trim() });
+      this.localItems.push({ id: 'n' + Date.now(), text: t, color: this.color, nickname: (ProfilePanel.data.nickname || '').trim(), createdAt: Date.now() });
       this.saveLocal();
       toast('便條貼上去了');
       return true;
@@ -1352,7 +1419,19 @@ const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/13.0.0/';
           by.className = 'note-by';
           by.textContent = `— ${n.nickname || '匿名同學'}${n.mine ? '（我的）' : ''}`;
           li.appendChild(by);
-        } else {
+        }
+        // 張貼時間（滑鼠停留可看完整日期時間）
+        const ts = noteTs(n);
+        if (ts) {
+          const tm = document.createElement('time');
+          tm.className = 'note-time';
+          tm.dataset.ts = ts;
+          tm.dateTime = new Date(ts).toISOString();
+          tm.title = noteFullTime(ts);
+          tm.textContent = noteTime(ts);
+          li.appendChild(tm);
+        }
+        if (this.mode !== 'shared') {
           const del = document.createElement('button');
           del.setAttribute('aria-label', '撕掉這張便條'); del.textContent = '✕';
           del.addEventListener('click', () => this.remove(n.id));
@@ -1362,8 +1441,15 @@ const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/13.0.0/';
       });
       $('noteCount').textContent = `${Array.from($('noteText').value).length}/40`;
     },
+    // 視窗開著時每 30 秒更新「幾分鐘前」，不重畫整個列表
+    updateTimes() {
+      if ($('noteModal').hidden) return;
+      const now = Date.now();
+      $('noteList').querySelectorAll('.note-time').forEach(el => { el.textContent = noteTime(Number(el.dataset.ts), now); });
+    },
     init() {
       this.items = this.localItems;
+      setInterval(() => this.updateTimes(), 30 * 1000);
       $('noteColors').addEventListener('click', e => {
         const b = e.target.closest('[data-note-color]');
         if (b) { this.color = b.dataset.noteColor; this.render(); }
