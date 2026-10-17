@@ -540,7 +540,7 @@
   <section class="stage" id="stage" aria-label="3D 自習室場景">
     <div class="label-layer" id="labelLayer"></div>
     <div class="chip" id="sceneChip"><span class="dot"></span><span id="sceneChipText">自修室</span></div>
-    <div class="pan-tip" id="panTip">左右拖曳查看教室</div>
+    <div class="pan-tip" id="panTip">拖曳查看教室・雙指可放大</div>
     <div class="hint" id="hint">先在右側設定暱稱，再點擊空位的椅子入座</div>
     <div class="tooltip" id="tooltip"></div>
     <div class="hud" id="hud" aria-label="專注計時">
@@ -1486,7 +1486,7 @@ const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/13.0.0/';
     { title: '歡迎來到線上自習室', art: icon('#E0775A', '<path d="M4 19V6a2 2 0 0 1 2-2h12v13H6a2 2 0 0 0-2 2zm0 0a2 2 0 0 0 2 2h12"/>'),
       items: ['和一群原創小動物同學一起讀書，陪讀感滿滿', '上方分頁可切換<b>自修室、圖書館、咖啡廳</b>，咖啡廳是深夜模式', '自修室與圖書館的窗外天色，會跟著真實時間變化'] },
     { title: '設定角色，選位置入座', art: icon('#7FA06B', '<circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/>'),
-      items: [`在${panelSide()}「我的角色」輸入<b>暱稱</b>，選動物、顏色，以及看書或筆電`, '點場景中<b>發亮的空位</b>入座，鏡頭會拉近到你的座位', '想換位置，按畫面下方的「換座位」'] },
+      items: [`在${panelSide()}「我的角色」輸入<b>暱稱</b>，選動物、顏色，以及看書或筆電`, '點場景中<b>發亮的空位</b>入座，鏡頭會拉近到你的座位；' + (canHoverDevice() ? '<b>滾輪</b>' : '<b>雙指捏合</b>') + '可放大看清楚再選', '想換位置，按畫面下方的「換座位」'] },
     { title: '開始專注', art: icon('#6E9CC4', '<circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2M9 2h6"/>'),
       items: ['按番茄鐘的<b>開始</b>進入專注模式，畫面只留精簡計時器',
         canHoverDevice() ? '面板會收到右側，<b>滑鼠移到右邊緣</b>就會展開' : '面板會收到右側，<b>點「面板」把手</b>就能展開',
@@ -1673,7 +1673,8 @@ const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/13.0.0/';
         return b;
       };
       if (this.seatId === null) {
-        hint.textContent = ProfilePanel.isReady() ? '點擊發亮的空位入座' : `先在${panelSide()}設定暱稱，再點擊空位的椅子入座`;
+        const zoomTip = canHoverDevice() ? '（滾輪可放大）' : '（雙指可放大）';
+        hint.textContent = ProfilePanel.isReady() ? '點擊發亮的空位入座' + zoomTip : `先在${panelSide()}設定暱稱，再點擊空位的椅子入座`;
       } else if (this.picking) {
         hint.append('點擊其他發亮的空位換位置', btn('取消', 'cancelPick'));
       } else {
@@ -3760,7 +3761,7 @@ function boot() {
     bounds: { minX: -10, maxX: 10, minY: -10, maxY: 10 },   // 整間教室在鏡頭座標中的範圍
     range: { x0: 0, x1: 0, y0: 0, y1: 0 },                  // 目前可平移的範圍
     panX: 0, panY: 0,
-    zoom: 1, zMin: 1, zMax: 2.2,                            // 近景縮放倍率（1 = 預設近景）
+    zoom: 1, zMin: 1, zMax: 2.2,                            // 縮放倍率（1 = 預設畫面）；全景與近景都可縮放
     recentering: false,
     lamp: 1
   };
@@ -3805,13 +3806,18 @@ function boot() {
       if (hw < 2.9) { hw = 2.9; hh = hw / aspect; }
       // 縮放範圍：最多放大 2.2 倍；縮小到畫面任一邊碰到教室邊界為止
       const b = view.bounds;
+      view.zMax = 2.2;
       view.zMin = Math.min(1, Math.max(hw / ((b.maxX - b.minX) / 2), hh / ((b.maxY - b.minY) / 2)));
       view.zoom = Math.max(view.zMin, Math.min(view.zMax, view.zoom));
       // 鏡頭中心略往上，讓角色落在畫面中下方，不被上方計時器擋住
       view.goal = { cx: v.x, cy: v.y + hh * (aspect < 1 ? 0.22 : 0.08), hw: hw / view.zoom, hh: hh / view.zoom };
     } else {
-      const B = view.base;
-      view.goal = { cx: B.cx, cy: B.cy, hw: B.hw, hh: B.hh };
+      // 全景：最多放大 3 倍，方便手機上看清楚、點準座位；縮小到看得到整間教室
+      const B = view.base, b = view.bounds;
+      view.zMax = 3;
+      view.zMin = Math.min(1, Math.max(B.hw / ((b.maxX - b.minX) / 2), B.hh / ((b.maxY - b.minY) / 2)));
+      view.zoom = Math.max(view.zMin, Math.min(view.zMax, view.zoom));
+      view.goal = { cx: B.cx, cy: B.cy, hw: B.hw / view.zoom, hh: B.hh / view.zoom };
     }
     // 可平移範圍：畫面不能拖出教室之外
     const g = view.goal, b = view.bounds;
@@ -3839,11 +3845,15 @@ function boot() {
     view.recentering = false;
     view.vx = view.vy = 0;
     // 近景時手指拖曳只用來移動畫面，不會變成捲動網頁而中斷
-    renderer.domElement.style.touchAction = mode === 'close' ? 'none' : '';
     updateGoal();
+    updateTouchAction();
     notifyPan();
   }
   // 回到座位：平移與縮放都平滑回到預設
+  // 近景或全景放大後，手指拖曳只用來移動畫面；全景未放大時保留上下滑動捲動網頁
+  function updateTouchAction() {
+    renderer.domElement.style.touchAction = camMode === 'close' || view.zoom > 1.02 ? 'none' : '';
+  }
   function recenter() { view.recentering = true; view.vx = view.vy = 0; view.zoom = 1; updateGoal(); }
   function applyView() {
     if (!view.cur) return;
@@ -3899,7 +3909,7 @@ function boot() {
   };
   // 縮放：以指定的螢幕位置為中心放大縮小，該點下方的物件會留在手指／游標下
   function zoomAt(factor, clientX, clientY) {
-    if (camMode !== 'close' || !view.cur) return;
+    if (!view.cur) return;
     const z0 = view.zoom, z1 = Math.max(view.zMin, Math.min(view.zMax, z0 * factor));
     if (Math.abs(z1 - z0) < 1e-4) return;
     const rect = stage.getBoundingClientRect();
@@ -3914,12 +3924,12 @@ function boot() {
     view.panY += oy * (hh0 - view.cur.hh);
     applyView();
     notifyPan();
+    updateTouchAction();
     tooltip.classList.remove('show');
     document.getElementById('panTip').style.display = 'none';
   }
-  // 電腦：滑鼠滾輪或觸控板雙指縮放（只在入座後的近景）
+  // 電腦：滑鼠滾輪或觸控板雙指縮放（全景選座位與入座後的近景都可用）
   renderer.domElement.addEventListener('wheel', e => {
-    if (camMode !== 'close') return;       // 全景時不攔截，網頁照常捲動
     e.preventDefault();
     const dy = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1);
     zoomAt(Math.exp(-dy * (e.ctrlKey ? 0.01 : 0.0015)), e.clientX, e.clientY);
@@ -3934,7 +3944,7 @@ function boot() {
   renderer.domElement.addEventListener('pointerdown', e => {
     if (e.pointerType !== 'mouse') {
       touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      if (touches.size === 2 && camMode === 'close') {
+      if (touches.size === 2) {
         if (drag) endDrag(null, true);       // 第一根手指的拖曳改成捏合，不產生慣性
         dragged = true;                      // 放開後不當成點擊
         view.vx = view.vy = 0;
